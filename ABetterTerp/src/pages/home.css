@@ -1,0 +1,146 @@
+/* UMD-themed Home styles */
+.home-root {
+  --primary-bg: #FFFFFF;
+  --secondary-bg: #F8F9FA;
+  --text-primary: #000000;
+  --umd-red: #E21833;
+  --umd-gold: #FFD200;
+  --border: #E0E0E0;
+
+  font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial;
+  color: var(--text-primary);
+}
+
+.home-container {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  min-height: 80vh;
+  background: var(--primary-bg);
+  padding: 2rem;
+}
+
+.home-card {
+  background: var(--secondary-bg);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+  width: 100%;
+  max-width: 900px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+  border: 1px solid var(--border);
+}
+
+.home-heading {
+  font-weight: 700;
+  font-size: 1.6rem;
+  margin: 0 0 0.5rem 0;
+  color: rgb(0, 0, 0);
+}
+
+.section-block {
+  margin-top: 1rem;
+  text-align: left;
+}
+
+.section-subblock {
+  margin-top: 0.5rem;
+}
+
+.affirmation {
+  font-size: 1rem;
+  color: rgba(0,0,0,0.85);
+}
+
+.affirmation-heading {
+  font-size: 1rem;
+  margin: 0;
+  font-weight: 700;
+  color: rgb(0, 0, 0);
+}
+
+.habits-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.habits-title {
+  font-weight: 700;
+}
+
+.sections-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.section {
+  background: #fff;
+  border-radius: 10px;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.04);
+}
+
+.section h3 {
+  margin: 0 0 0.5rem 0;
+  font-size: 1.05rem;
+}
+
+.section p { margin: 0; color: rgba(0,0,0,0.75); }
+
+.section-academic {
+  border-left: 6px solid var(--umd-gold);
+}
+
+.section-health {
+  border-left: 6px solid var(--umd-red);
+}
+
+.streak {
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+}
+
+.habit-empty {
+  color: rgba(0,0,0,0.6);
+}
+
+.habits-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.habit-item {
+  display: block;
+  padding: 0.5rem;
+  border-radius: 8px;
+  background: #fbfbfb;
+  border: 1px solid var(--border);
+}
+
+.habit-title {
+  margin-left: 8px;
+  font-weight: 600;
+}
+
+.habit-description {
+  font-size: 0.9rem;
+  color: rgba(0,0,0,0.6);
+}
+
+.habit-item input { transform: scale(1.05); }
+
+.button-row {
+  margin-top: 0.75rem;
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Responsive: stack sections on small screens */
+@media (max-width: 680px) {
+  .sections-grid { grid-template-columns: 1fr; }
+}

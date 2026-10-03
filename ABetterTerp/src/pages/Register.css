@@ -1,0 +1,90 @@
+.root {
+    --primary-bg: #FFFFFF;
+    --secondary-bg: #F8F9FA;
+    --text-primary: #000000;
+    --umd-red: #E21833;
+    --umd-gold: #FFD200;
+    --border: #E0E0E0;
+    --success: #28A745;
+    --warning: #FFC107;
+    --error: #DC3545;
+
+    font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial;
+    color: var(--text-primary);
+}
+
+.form-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 80vh;
+    background: var(--primary-bg);
+    padding: 2rem;
+}
+
+.auth-card {
+    background: var(--secondary-bg);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    width: 100%;
+    max-width: 420px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.06);
+    border: 1px solid var(--border);
+    text-align: center;
+}
+
+.auth-heading {
+    font-weight: 700;
+    font-size: 1.5rem;
+    margin: 0;
+}
+
+.auth-form {
+    margin-top: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.auth-input {
+    width: 100%;
+    padding: 0.75rem 0.85rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    font-size: 0.95rem;
+    box-sizing: border-box;
+}
+
+.btn {
+    padding: 0.65rem 0.9rem;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    font-size: 1rem;
+}
+
+.btn-primary {
+    background: var(--umd-red);
+    color: #ffffff;
+}
+
+.btn-secondary {
+    background: var(--umd-gold);
+    color: #000000;
+}
+
+.auth-link {
+    margin-top: 0.75rem;
+}
+
+.auth-link a {
+    color: var(--umd-red);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.auth-message {
+    margin-top: 1rem;
+    font-size: 0.95rem;
+}
