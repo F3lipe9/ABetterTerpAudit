@@ -304,15 +304,9 @@ async def initialize_default_affirmations():
         for text in defaults:
             await affirmations_collection.insert_one({"text": text})
 
-async def ensure_default_exercises(username: str):
-    """Seed default exercises for this user if they don't already have any."""
-    count = await exercises_collection.count_documents({"username": username})
-    if count > 0:
-        return
-
-    docs = []
-    for ex in DEFAULT_EXERCISES:
-        docs.append({**ex, "username": username})
+async def seed_default_exercises(username: str):
+    """Give a newly registered user their own copy of the default exercise library."""
+    docs = [{**ex, "username": username} for ex in DEFAULT_EXERCISES]
     if docs:
         await exercises_collection.insert_many(docs)
 
@@ -405,6 +399,12 @@ async def register_user(request: Request, data: RegisterRequest):
         })
     except DuplicateKeyError:
         raise failure
+
+    try:
+        await seed_default_exercises(data.username)
+    except Exception:
+        # The account exists; don't turn a seeding hiccup into a failed registration
+        logger.exception("Failed to seed default exercises for new user")
 
     return {"message": "User registered successfully", "user_id": str(result.inserted_id)}
 
@@ -636,11 +636,8 @@ async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_cur
 async def get_exercises(current_user: str = Depends(get_current_user)):
     """
     Returns the exercise library for a user.
-    Seeds defaults on first access.
     """
     try:
-        await ensure_default_exercises(current_user)
-
         exercises = await exercises_collection.find({"username": current_user}).to_list(2000)
 
         for ex in exercises:
