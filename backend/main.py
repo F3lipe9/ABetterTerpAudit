@@ -23,7 +23,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from fastapi.concurrency import run_in_threadpool
-from datetime import datetime, timedelta, timezone
+from datetime import date as date_type, datetime, timedelta, timezone
 
 load_dotenv()
 logger = logging.getLogger("uvicorn.error")
@@ -140,19 +140,25 @@ class AffirmationModel(BaseModel):
 class AffirmationCreate(BaseModel):
     text: str
 
+# Bounds shared by every water model
+BOTTLE_NAME = dict(min_length=1, max_length=50)
+BOTTLE_OZ = dict(ge=1, le=256)
+DAILY_GOAL_OZ = dict(ge=1, le=1000)
+CURRENT_OZ = dict(ge=0, le=10000)
+
 class WaterIntakeModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     username: str = Field(...)
-    bottleName: str = Field(..., min_length=1)
-    bottleOz: int = Field(..., ge=1)
-    dailyGoal: int = Field(..., ge=1)
-    currentOz: int = Field(default=0, ge=0)
+    bottleName: str = Field(..., **BOTTLE_NAME)
+    bottleOz: int = Field(..., **BOTTLE_OZ)
+    dailyGoal: int = Field(..., **DAILY_GOAL_OZ)
+    currentOz: int = Field(default=0, **CURRENT_OZ)
 
 class WaterIntakeUpsert(BaseModel):
-    bottleName: str
-    bottleOz: int
-    dailyGoal: int
-    currentOz: int | None = 0
+    bottleName: str = Field(..., **BOTTLE_NAME)
+    bottleOz: int = Field(..., **BOTTLE_OZ)
+    dailyGoal: int = Field(..., **DAILY_GOAL_OZ)
+    currentOz: int = Field(default=0, **CURRENT_OZ)
 
 class ExerciseModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -178,10 +184,24 @@ class ExerciseUpdate(BaseModel):
     compound: Optional[bool] = None
     category: Optional[str] = None
 
+EXAM_MIN_YEAR, EXAM_MAX_YEAR = 2000, 2100
+
+def validate_exam_date(v: str) -> str:
+    """Accept only a real calendar date, YYYY-MM-DD, within a sane year range."""
+    try:
+        d = date_type.fromisoformat(v)
+    except (TypeError, ValueError):
+        raise ValueError("Date must be a valid YYYY-MM-DD date")
+    if len(v) != 10 or not EXAM_MIN_YEAR <= d.year <= EXAM_MAX_YEAR:
+        raise ValueError(f"Date must be YYYY-MM-DD with a year between {EXAM_MIN_YEAR} and {EXAM_MAX_YEAR}")
+    return v
+
 class ExamCreate(BaseModel):
-    course: str
+    course: str = Field(..., min_length=1, max_length=100)
     date: str
-    planned_hours: int
+    planned_hours: int = Field(..., ge=0, le=1000)
+
+    _check_date = field_validator("date")(validate_exam_date)
 
 # Assignment Models
 class AssignmentBase(BaseModel):
@@ -224,9 +244,14 @@ class Course(CourseBase):
 class ExamUpdate(BaseModel):
     course: str | None = None
     date: str | None = None
-    planned_hours: int | None = None
+    planned_hours: int | None = Field(default=None, ge=0, le=1000)
     score: int | None = None
     done: bool | None = None
+
+    @field_validator("date")
+    @classmethod
+    def _check_date(cls, v):
+        return v if v is None else validate_exam_date(v)
 
 # ---------------------------
 # Default Data
