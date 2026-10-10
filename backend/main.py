@@ -12,6 +12,8 @@ from pymongo import AsyncMongoClient
 from pymongo import ReturnDocument
 from dotenv import load_dotenv
 import uuid
+import bcrypt
+from fastapi.concurrency import run_in_threadpool
 from datetime import datetime
 
 load_dotenv()
@@ -256,6 +258,15 @@ async def startup_event():
     await initialize_default_affirmations()
     # Removed: await initialize_sample_data()  # Don't auto-populate sample assignments
 
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+
+def verify_password(password: str, hashed: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("ascii"))
+    except ValueError:  # malformed hash (e.g. legacy plaintext) or password over 72 bytes
+        return False
+
 # REGISTER USER
 @app.post(
     "/register",
@@ -266,6 +277,9 @@ async def register_user(data: RegisterRequest):
     """
     Register a new user.
     """
+    if len(data.password.encode("utf-8")) > 72:  # bcrypt input limit
+        raise HTTPException(status_code=400, detail="Password must be at most 72 bytes")
+
     # Check if username already exists
     existing_user = await users_collection.find_one({"username": data.username})
     if existing_user:
@@ -280,7 +294,7 @@ async def register_user(data: RegisterRequest):
     new_user = {
         "username": data.username,
         "email": data.email,
-        "password": data.password  # In production, hash this password!
+        "password": await run_in_threadpool(hash_password, data.password)
     }
     
     result = await users_collection.insert_one(new_user)
@@ -294,12 +308,11 @@ async def login_user(data: LoginRequest):
     """
     Authenticate user with username and password.
     """
-    user = await users_collection.find_one({
-        "username": data.username,
-        "password": data.password  # In production, compare hashed passwords!
-    })
-    
-    if not user:
+    user = await users_collection.find_one({"username": data.username})
+
+    if not user or not await run_in_threadpool(
+        verify_password, data.password, user.get("password", "")
+    ):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     
     return {
