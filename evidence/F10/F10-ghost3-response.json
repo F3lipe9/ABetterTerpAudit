@@ -1,0 +1,189 @@
+[
+  {
+    "_id": "6aca7bbec8f60271923c8ad8",
+    "id": "bench",
+    "name": "Barbell Bench Press",
+    "muscle": "Chest",
+    "equipment": "Barbell",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ad9",
+    "id": "squat",
+    "name": "Back Squat",
+    "muscle": "Legs",
+    "equipment": "Barbell",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ada",
+    "id": "deadlift",
+    "name": "Deadlift",
+    "muscle": "Legs",
+    "equipment": "Barbell",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8adb",
+    "id": "ohp",
+    "name": "Overhead Press",
+    "muscle": "Shoulders",
+    "equipment": "Barbell",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8adc",
+    "id": "row",
+    "name": "Barbell Row",
+    "muscle": "Back",
+    "equipment": "Barbell",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8add",
+    "id": "pullup",
+    "name": "Pull-Ups",
+    "muscle": "Back",
+    "equipment": "Bodyweight",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ade",
+    "id": "latpull",
+    "name": "Lat Pulldown",
+    "muscle": "Back",
+    "equipment": "Cable",
+    "compound": false,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8adf",
+    "id": "legpress",
+    "name": "Leg Press",
+    "muscle": "Legs",
+    "equipment": "Machine",
+    "compound": true,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae0",
+    "id": "curl",
+    "name": "Dumbbell Curl",
+    "muscle": "Arms",
+    "equipment": "Dumbbell",
+    "compound": false,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae1",
+    "id": "tricep",
+    "name": "Triceps Pushdown",
+    "muscle": "Arms",
+    "equipment": "Cable",
+    "compound": false,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae2",
+    "id": "lateral",
+    "name": "Lateral Raises",
+    "muscle": "Shoulders",
+    "equipment": "Dumbbell",
+    "compound": false,
+    "category": "Strength",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae3",
+    "id": "tread",
+    "name": "Treadmill Run",
+    "muscle": "Cardio",
+    "equipment": "Treadmill",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae4",
+    "id": "bike",
+    "name": "Stationary Bike",
+    "muscle": "Cardio",
+    "equipment": "Bike",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae5",
+    "id": "rower",
+    "name": "Rowing Machine",
+    "muscle": "Cardio",
+    "equipment": "Rower",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae6",
+    "id": "elliptical",
+    "name": "Elliptical",
+    "muscle": "Cardio",
+    "equipment": "Elliptical",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae7",
+    "id": "stairs",
+    "name": "Stair Climber",
+    "muscle": "Cardio",
+    "equipment": "Machine",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  },
+  {
+    "_id": "6aca7bbec8f60271923c8ae8",
+    "id": "jumprope",
+    "name": "Jump Rope",
+    "muscle": "Cardio",
+    "equipment": "Bodyweight",
+    "compound": false,
+    "category": "Cardio",
+    "createdByUser": false,
+    "username": "ghost3"
+  }
+]
