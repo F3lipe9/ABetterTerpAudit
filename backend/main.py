@@ -1,6 +1,6 @@
 import os
 from typing import List, Optional
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response
 from pydantic import ConfigDict, BaseModel, Field
@@ -16,6 +16,10 @@ import uuid
 import bcrypt
 import jwt
 import secrets
+import time
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta, timezone
 
@@ -31,7 +35,10 @@ JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 bearer_scheme = HTTPBearer(auto_error=False)
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Add CORS middleware FIRST before any routes
 app.add_middleware(
@@ -342,18 +349,57 @@ async def register_user(data: RegisterRequest):
     
     return {"message": "User registered successfully", "user_id": str(result.inserted_id)}
 
+# Per-username login backoff (in-memory: per process, reset on restart)
+LOGIN_FREE_ATTEMPTS = 5      # failures allowed before any lockout
+LOGIN_BASE_LOCK_S = 30       # first lockout; doubles with each further failure
+LOGIN_MAX_LOCK_S = 900       # lockout cap (15 min), limits abuse as a lockout-DoS
+LOGIN_FAILURE_TTL_S = 900    # failure count is forgotten after this much quiet
+_login_failures: dict[str, tuple[int, float, float]] = {}  # name -> (count, locked_until, last_failure)
+
+def _login_retry_after(username: str) -> int:
+    entry = _login_failures.get(username)
+    remaining = entry[1] - time.monotonic() if entry else 0
+    return int(remaining) + 1 if remaining > 0 else 0
+
+def _record_login_failure(username: str) -> None:
+    now = time.monotonic()
+    if len(_login_failures) > 10000:  # bound memory against junk usernames
+        for k in [k for k, v in _login_failures.items() if now - v[2] > LOGIN_FAILURE_TTL_S]:
+            del _login_failures[k]
+    count, _, last = _login_failures.get(username, (0, 0.0, now))
+    if now - last > LOGIN_FAILURE_TTL_S:
+        count = 0
+    count += 1
+    lock = 0.0
+    if count >= LOGIN_FREE_ATTEMPTS:
+        lock = min(LOGIN_BASE_LOCK_S * 2 ** (count - LOGIN_FREE_ATTEMPTS), LOGIN_MAX_LOCK_S)
+    _login_failures[username] = (count, now + lock, now)
+
 # LOGIN USER
 @app.post("/login")
-async def login_user(data: LoginRequest):
+@limiter.limit("10/minute")
+async def login_user(request: Request, data: LoginRequest):
     """
     Authenticate user with username and password.
     """
+    # Applies to unknown usernames too, so lockout does not reveal which accounts exist.
+    retry_after = _login_retry_after(data.username)
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many failed attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = await users_collection.find_one({"username": data.username})
 
     if not user or not await run_in_threadpool(
         verify_password, data.password, user.get("password", "")
     ):
+        _record_login_failure(data.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    _login_failures.pop(data.username, None)
     
     return {
         "message": f"Login successful for {data.username}",
