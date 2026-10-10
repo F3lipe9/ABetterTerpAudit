@@ -499,6 +499,46 @@ Ran `bandit` against the backend source (636 lines scanned, 0 skipped).
 
 ---
 
+## F16 - No application-level security event logging
+
+**Endpoint:** `POST /login`, all authenticated routes
+**Severity:** Low (qualitative; detection/forensics gap, no direct compromise)
+**Status:** Confirmed
+**Evidence:** `evidence/F16-pre-fix-log-capture.txt` (before), `evidence/F16-post-fix-log-capture.txt` (after)
+
+### Description
+The application emitted no security events of its own. The only trace of a failed login, a rejected token or a rate-limit hit was uvicorn's access log line, which records method, path and status but not the username, the reason or any event name. A failed login for a real account and one for a nonexistent account look identical, a 401 on `/habits` does not say whether the token was missing, malformed or expired, and nothing marks a lockout.
+
+### Reproduction
+Pre-fix capture: one failed login for `victimUser`, one request with a bad bearer token, then 11 valid logins for `postTest1`. The log contains only access lines (`POST /login ... 401 Unauthorized`, `GET /habits ... 401 Unauthorized`, ..., `429 Too Many Requests`). There is no WARNING-level line and no username, reason or lockout information.
+
+### Impact
+Credential stuffing, token probing and brute-force attempts leave no usable audit trail, so they cannot be detected or investigated after the fact.
+
+### Fix verified
+`logger.warning("SECURITY ...")` lines now record `login_failed` (username, IP, consecutive failures, lockout), `login_locked`, `auth_failed` (reason: missing, invalid or expired token), `forbidden`, and `rate_limited`, plus an INFO `login_success`. Client-supplied usernames are logged with `repr()` and truncated, so a newline in a username cannot forge a log line (verified: `'victimUser
+FAKE LOG LINE'` appears on one line). Post-fix capture shows each event.
+
+---
+
+## F17 - Shared collections writable by any authenticated user; no field length limits
+
+**Endpoint:** `POST /affirmations`, `POST /courses`; length limits on habits, exercises, assignments
+**Severity:** Medium (qualitative; any logged-in user can alter content served to every user)
+**Status:** Confirmed
+**Evidence:** `evidence/F17-shared-content-probe.txt`
+
+### Description
+Affirmations and courses are shared by all users, but any authenticated user could create entries, and the text fields had no length limits (a 1 MB course name was accepted). Habits, exercises and assignments also had no length or enum limits.
+
+### Impact
+One user can place misleading or abusive content in front of every user, or bloat the database. An XSS probe showed the payload stored verbatim, but the React frontend renders it as inert text (no HTML sinks in `ABetterTerp/src`; not tested in a live browser).
+
+### Fix verified
+Writes to `/affirmations` and `/courses` now require an admin (usernames in the `ADMIN_USERNAMES` environment variable; empty means nobody). All user-supplied text has trimmed length limits, assignment `status`, `priority`, `type` and exercise `category` are enums, `points` is digits only, and dates must match `YYYY-MM-DD` exactly.
+
+---
+
 ## Non-security observations (not counted)
 
 1. **`PUT /assignments/{id}` does not persist updates.** (a) The body model is `AssignmentCreate`, so every field is required and a partial `{"status": ...}` gets a 422 before the handler runs; (b) when submitted values equal stored ones, `modified_count == 0` raises 404, which the blanket `except Exception` re-raises as 500. `get_assignment` and `delete_assignment` share the flaw. **[PENDING]** confirm with the status code and body from Burp.

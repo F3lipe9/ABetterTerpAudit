@@ -1,10 +1,11 @@
 import logging
 import os
-from typing import List, Optional
+import re
+from typing import List, Literal, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response
-from pydantic import ConfigDict, BaseModel, EmailStr, Field, field_validator
+from pydantic import ConfigDict, BaseModel, EmailStr, Field, StringConstraints, field_validator
 from pydantic.functional_validators import BeforeValidator
 from typing_extensions import Annotated
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,13 @@ from datetime import date as date_type, datetime, timedelta, timezone
 
 load_dotenv()
 logger = logging.getLogger("uvicorn.error")
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+def _log_value(value: str) -> str:
+    """repr() and truncate client-supplied text so it cannot forge log lines."""
+    return repr(value[:64])
 MONGO_URL = os.getenv("MONGO_URL")
 
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -37,11 +45,18 @@ if not JWT_SECRET:
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
 bearer_scheme = HTTPBearer(auto_error=False)
+# Usernames allowed to write shared content (affirmations, courses). Empty = nobody.
+ADMIN_USERNAMES = {u.strip() for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()}
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
 app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+async def _logged_rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    logger.warning("SECURITY rate_limited ip=%s path=%s limit=%s", _client_ip(request), request.url.path, exc.detail)
+    return _rate_limit_exceeded_handler(request, exc)
+
+app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_handler)
 
 # Add CORS middleware FIRST before any routes
 app.add_middleware(
@@ -76,6 +91,10 @@ def parse_object_id(value: str) -> ObjectId:
     if not ObjectId.is_valid(value):
         raise HTTPException(status_code=400, detail="Invalid id")
     return ObjectId(value)
+
+def bounded(max_length: int, min_length: int = 1):
+    """A whitespace-trimmed string with enforced length limits."""
+    return Annotated[str, StringConstraints(strip_whitespace=True, min_length=min_length, max_length=max_length)]
 
 # Type for MongoDB ObjectId
 PyObjectId = Annotated[str, BeforeValidator(str)]
@@ -127,8 +146,8 @@ class HabitModel(BaseModel):
     description: str = Field(default="")
 
 class HabitCreate(BaseModel):
-    title: str
-    description: str | None = ""
+    title: bounded(100)
+    description: bounded(500, min_length=0) | None = ""
 
 class AffirmationModel(BaseModel):
     id: PyObjectId | None = Field(alias="_id", default=None)
@@ -138,7 +157,7 @@ class AffirmationModel(BaseModel):
     )
 
 class AffirmationCreate(BaseModel):
-    text: str
+    text: bounded(280)
 
 # Bounds shared by every water model
 BOTTLE_NAME = dict(min_length=1, max_length=50)
@@ -171,28 +190,31 @@ class ExerciseModel(BaseModel):
     createdByUser: bool = Field(default=True)
 
 class ExerciseCreate(BaseModel):
-    name: str
-    muscle: str = "Other"
-    equipment: str = "Other"
+    name: bounded(100)
+    muscle: bounded(50) = "Other"
+    equipment: bounded(50) = "Other"
     compound: bool = False
-    category: str = "Strength"
+    category: Literal["Strength", "Cardio"] = "Strength"
 
 class ExerciseUpdate(BaseModel):
-    name: Optional[str] = None
-    muscle: Optional[str] = None
-    equipment: Optional[str] = None
+    name: Optional[bounded(100)] = None
+    muscle: Optional[bounded(50)] = None
+    equipment: Optional[bounded(50)] = None
     compound: Optional[bool] = None
-    category: Optional[str] = None
+    category: Optional[Literal["Strength", "Cardio"]] = None
 
 EXAM_MIN_YEAR, EXAM_MAX_YEAR = 2000, 2100
 
-def validate_exam_date(v: str) -> str:
+def validate_iso_date(v: str) -> str:
     """Accept only a real calendar date, YYYY-MM-DD, within a sane year range."""
+    # fromisoformat alone also accepts forms like 2026-W41-6 or 20261010
+    if not isinstance(v, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+        raise ValueError("Date must be a valid YYYY-MM-DD date")
     try:
         d = date_type.fromisoformat(v)
-    except (TypeError, ValueError):
+    except ValueError:
         raise ValueError("Date must be a valid YYYY-MM-DD date")
-    if len(v) != 10 or not EXAM_MIN_YEAR <= d.year <= EXAM_MAX_YEAR:
+    if not EXAM_MIN_YEAR <= d.year <= EXAM_MAX_YEAR:
         raise ValueError(f"Date must be YYYY-MM-DD with a year between {EXAM_MIN_YEAR} and {EXAM_MAX_YEAR}")
     return v
 
@@ -201,17 +223,19 @@ class ExamCreate(BaseModel):
     date: str
     planned_hours: int = Field(..., ge=0, le=1000)
 
-    _check_date = field_validator("date")(validate_exam_date)
+    _check_date = field_validator("date")(validate_iso_date)
 
 # Assignment Models
 class AssignmentBase(BaseModel):
-    title: str
-    course: str
+    title: bounded(200)
+    course: bounded(100)
     dueDate: str
-    status: str = "pending"
-    priority: str = "medium"
-    type: str = "homework"
-    points: str = "0"
+    status: Literal["pending", "in-progress", "completed"] = "pending"
+    priority: Literal["low", "medium", "high"] = "medium"
+    type: Literal["homework", "exam", "project", "lab"] = "homework"
+    points: str = Field(default="0", pattern=r"^\d{0,6}$")
+
+    _check_due_date = field_validator("dueDate")(validate_iso_date)
 
 class AssignmentCreate(AssignmentBase):
     pass
@@ -226,9 +250,9 @@ class Assignment(AssignmentBase):
         json_encoders = {ObjectId: str}
 
 class CourseBase(BaseModel):
-    code: str
-    name: str
-    professor: str
+    code: bounded(20)
+    name: bounded(200)
+    professor: bounded(100)
 
 class CourseCreate(CourseBase):
     pass
@@ -251,7 +275,7 @@ class ExamUpdate(BaseModel):
     @field_validator("date")
     @classmethod
     def _check_date(cls, v):
-        return v if v is None else validate_exam_date(v)
+        return v if v is None else validate_iso_date(v)
 
 # ---------------------------
 # Default Data
@@ -319,11 +343,9 @@ async def startup_event():
     """Initialize database with default data on startup"""
     await initialize_default_affirmations()
     # Unique indexes make registration collisions atomic (no check-then-insert race)
-    try:
-        await users_collection.create_index("username", unique=True)
-        await users_collection.create_index("email", unique=True)
-    except Exception as e:
-        print(f"WARNING: could not create unique user indexes: {e}")
+    # Not caught on purpose: without these the check-then-insert race returns, so fail startup
+    await users_collection.create_index("username", unique=True)
+    await users_collection.create_index("email", unique=True)
     # Removed: await initialize_sample_data()  # Don't auto-populate sample assignments
 
 def hash_password(password: str) -> str:
@@ -346,6 +368,7 @@ def create_access_token(user_id: str, username: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 async def get_current_user(
+    request: Request,
     creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
 ) -> str:
     """Return the authenticated username from a valid Bearer token, else 401."""
@@ -355,6 +378,7 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     if creds is None:
+        logger.warning("SECURITY auth_failed reason=missing_token ip=%s path=%s", _client_ip(request), request.url.path)
         raise unauthorized
     try:
         payload = jwt.decode(
@@ -363,9 +387,21 @@ async def get_current_user(
             algorithms=[JWT_ALGORITHM],
             options={"require": ["exp", "sub"]},
         )
+    except jwt.ExpiredSignatureError:
+        logger.warning("SECURITY auth_failed reason=expired_token ip=%s path=%s", _client_ip(request), request.url.path)
+        raise unauthorized
     except jwt.PyJWTError:
+        logger.warning("SECURITY auth_failed reason=invalid_token ip=%s path=%s", _client_ip(request), request.url.path)
         raise unauthorized
     return payload["username"]
+
+async def require_admin(
+    request: Request, current_user: str = Depends(get_current_user)
+) -> str:
+    if current_user not in ADMIN_USERNAMES:
+        logger.warning("SECURITY forbidden user=%s ip=%s path=%s", _log_value(current_user), _client_ip(request), request.url.path)
+        raise HTTPException(status_code=403, detail="Forbidden")
+    return current_user
 
 DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
 
@@ -420,7 +456,7 @@ def _login_retry_after(username: str) -> int:
     remaining = entry[1] - time.monotonic() if entry else 0
     return int(remaining) + 1 if remaining > 0 else 0
 
-def _record_login_failure(username: str) -> None:
+def _record_login_failure(username: str) -> tuple[int, float]:
     now = time.monotonic()
     if len(_login_failures) > 10000:  # bound memory against junk usernames
         for k in [k for k, v in _login_failures.items() if now - v[2] > LOGIN_FAILURE_TTL_S]:
@@ -433,6 +469,7 @@ def _record_login_failure(username: str) -> None:
     if count >= LOGIN_FREE_ATTEMPTS:
         lock = min(LOGIN_BASE_LOCK_S * 2 ** (count - LOGIN_FREE_ATTEMPTS), LOGIN_MAX_LOCK_S)
     _login_failures[username] = (count, now + lock, now)
+    return count, lock
 
 # LOGIN USER
 @app.post("/login")
@@ -444,6 +481,8 @@ async def login_user(request: Request, data: LoginRequest):
     # Applies to unknown usernames too, so lockout does not reveal which accounts exist.
     retry_after = _login_retry_after(data.username)
     if retry_after:
+        logger.warning("SECURITY login_locked username=%s ip=%s retry_after=%ss",
+                       _log_value(data.username), _client_ip(request), retry_after)
         raise HTTPException(
             status_code=429,
             detail="Too many failed attempts. Try again later.",
@@ -456,10 +495,14 @@ async def login_user(request: Request, data: LoginRequest):
     stored_hash = user.get("password", "") if user else DUMMY_PASSWORD_HASH
     password_ok = await run_in_threadpool(verify_password, data.password, stored_hash)
     if not user or not password_ok:
-        _record_login_failure(data.username)
+        count, lock = _record_login_failure(data.username)
+        logger.warning("SECURITY login_failed username=%s ip=%s consecutive_failures=%d%s",
+                       _log_value(data.username), _client_ip(request), count,
+                       f" lockout={int(lock)}s" if lock else "")
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
     _login_failures.pop(data.username, None)
+    logger.info("SECURITY login_success username=%s ip=%s", _log_value(data.username), _client_ip(request))
     
     return {
         "message": f"Login successful for {data.username}",
@@ -560,7 +603,7 @@ async def get_affirmations(current_user: str = Depends(get_current_user)):
     response_description="Create new affirmation",
     status_code=status.HTTP_201_CREATED,
 )
-async def create_affirmation(a: AffirmationCreate, current_user: str = Depends(get_current_user)):
+async def create_affirmation(a: AffirmationCreate, current_user: str = Depends(require_admin)):
     """
     Create a new affirmation.
     """
@@ -873,7 +916,7 @@ async def get_courses(current_user: str = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/courses", response_description="Create new course", status_code=status.HTTP_201_CREATED, response_model=Course)
-async def create_course(course: CourseCreate, current_user: str = Depends(get_current_user)):
+async def create_course(course: CourseCreate, current_user: str = Depends(require_admin)):
     """
     Create a new course.
     """
