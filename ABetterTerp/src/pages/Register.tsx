@@ -34,20 +34,13 @@ export default function Register() {
       const data = await response.json();
 
       if (response.ok) {
-        setMessage("Registration successful!");
-        setUsername("");
-        setEmail("");
-        setPassword("");
-
-        // Store user info in localStorage
-        localStorage.setItem("username", username);
-        localStorage.setItem("email", email);
-
-    setMessage(`Logged in as ${username}`);
-
-        setTimeout(() => navigate("/home"), 500);
+        // Registration does not issue a token; sign in to get one
+        navigate("/login");
+      } else if (Array.isArray(data.detail)) {
+        // Validation errors (422): show the first field message
+        setMessage(`Error: ${data.detail[0]?.msg ?? "Invalid input"}`);
       } else {
-        setMessage(`Error: ${data.detail}`);
+        setMessage(`Error: ${data.detail ?? "Registration failed"}`);
       }
     } catch (err) {
       console.error(err);

@@ -1,9 +1,10 @@
+import logging
 import os
 from typing import List, Optional
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response
-from pydantic import ConfigDict, BaseModel, Field
+from pydantic import ConfigDict, BaseModel, EmailStr, Field, field_validator
 from pydantic.functional_validators import BeforeValidator
 from typing_extensions import Annotated
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from bson import ObjectId
 from pymongo import AsyncMongoClient
 from pymongo import ReturnDocument
+from pymongo.errors import DuplicateKeyError
 from dotenv import load_dotenv
 import uuid
 import bcrypt
@@ -24,6 +26,7 @@ from fastapi.concurrency import run_in_threadpool
 from datetime import datetime, timedelta, timezone
 
 load_dotenv()
+logger = logging.getLogger("uvicorn.error")
 MONGO_URL = os.getenv("MONGO_URL")
 
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -68,6 +71,12 @@ exams_collection = db.get_collection("exams")
 assignments_collection = db.get_collection("assignments")
 courses_collection = db.get_collection("courses")
 
+def parse_object_id(value: str) -> ObjectId:
+    """Parse a path id, answering 400 for malformed input instead of failing later."""
+    if not ObjectId.is_valid(value):
+        raise HTTPException(status_code=400, detail="Invalid id")
+    return ObjectId(value)
+
 # Type for MongoDB ObjectId
 PyObjectId = Annotated[str, BeforeValidator(str)]
 
@@ -88,9 +97,28 @@ class LoginRequest(BaseModel):
     password: str
 
 class RegisterRequest(BaseModel):
-    username: str
-    email: str
-    password: str
+    username: str = Field(..., min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    email: EmailStr = Field(..., max_length=254)
+    password: str = Field(..., min_length=8)
+
+    @field_validator("username", mode="before")
+    @classmethod
+    def _strip_username(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("email", mode="after")
+    @classmethod
+    def _lower_email(cls, v):
+        return v.lower()
+
+    @field_validator("password")
+    @classmethod
+    def _password_fits_bcrypt(cls, v):
+        if len(v.encode("utf-8")) > 72:  # bcrypt input limit
+            raise ValueError("Password must be at most 72 bytes")
+        if not v.strip():
+            raise ValueError("Password cannot be blank")
+        return v
 
 class HabitModel(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -271,6 +299,12 @@ async def ensure_default_exercises(username: str):
 async def startup_event():
     """Initialize database with default data on startup"""
     await initialize_default_affirmations()
+    # Unique indexes make registration collisions atomic (no check-then-insert race)
+    try:
+        await users_collection.create_index("username", unique=True)
+        await users_collection.create_index("email", unique=True)
+    except Exception as e:
+        print(f"WARNING: could not create unique user indexes: {e}")
     # Removed: await initialize_sample_data()  # Don't auto-populate sample assignments
 
 def hash_password(password: str) -> str:
@@ -314,39 +348,39 @@ async def get_current_user(
         raise unauthorized
     return payload["username"]
 
+DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(16))
+
 # REGISTER USER
 @app.post(
     "/register",
     response_description="Register new user",
     status_code=status.HTTP_201_CREATED,
 )
-async def register_user(data: RegisterRequest):
+@limiter.limit("5/minute")
+async def register_user(request: Request, data: RegisterRequest):
     """
     Register a new user.
     """
-    if len(data.password.encode("utf-8")) > 72:  # bcrypt input limit
-        raise HTTPException(status_code=400, detail="Password must be at most 72 bytes")
+    # Same generic failure whether the username or the email is taken, and the hash
+    # is computed first so a collision does not answer measurably faster.
+    hashed = await run_in_threadpool(hash_password, data.password)
+    failure = HTTPException(status_code=400, detail="Registration failed")
 
-    # Check if username already exists
-    existing_user = await users_collection.find_one({"username": data.username})
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    
-    # Check if email already exists
-    existing_email = await users_collection.find_one({"email": data.email})
-    if existing_email:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    # Create new user
-    new_user = {
-        "username": data.username,
-        "email": data.email,
-        "password": await run_in_threadpool(hash_password, data.password)
-    }
-    
-    result = await users_collection.insert_one(new_user)
-    new_user["_id"] = result.inserted_id
-    
+    taken = await users_collection.find_one(
+        {"$or": [{"username": data.username}, {"email": data.email}]}
+    )
+    if taken:
+        raise failure
+
+    try:
+        result = await users_collection.insert_one({
+            "username": data.username,
+            "email": data.email,
+            "password": hashed,
+        })
+    except DuplicateKeyError:
+        raise failure
+
     return {"message": "User registered successfully", "user_id": str(result.inserted_id)}
 
 # Per-username login backoff (in-memory: per process, reset on restart)
@@ -393,9 +427,10 @@ async def login_user(request: Request, data: LoginRequest):
 
     user = await users_collection.find_one({"username": data.username})
 
-    if not user or not await run_in_threadpool(
-        verify_password, data.password, user.get("password", "")
-    ):
+    # Verify against a dummy hash when the user does not exist so timing does not reveal it
+    stored_hash = user.get("password", "") if user else DUMMY_PASSWORD_HASH
+    password_ok = await run_in_threadpool(verify_password, data.password, stored_hash)
+    if not user or not password_ok:
         _record_login_failure(data.username)
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
@@ -417,7 +452,6 @@ async def get_habits(current_user: str = Depends(get_current_user)):
     """
     try:
         habits = await habits_collection.find({"username": current_user}).to_list(1000)
-        print(f"Found {len(habits)} habits")
         
         # Convert ObjectId to string for JSON serialization
         for habit in habits:
@@ -425,9 +459,11 @@ async def get_habits(current_user: str = Depends(get_current_user)):
                 habit["_id"] = str(habit["_id"])
         
         return habits
-    except Exception as e:
-        print(f"Error fetching habits: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch habits: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching habits")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post(
     "/habits",
@@ -456,9 +492,11 @@ async def create_habit(h: HabitCreate, current_user: str = Depends(get_current_u
             "message": "Habit created successfully",
             "habit": new_habit
         }
-    except Exception as e:
-        print(f"Error creating habit: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create habit: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating habit")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # Delete habit endpoint
 @app.delete("/habits/{habit_id}", response_description="Delete habit")
@@ -471,7 +509,7 @@ async def delete_habit(habit_id: str, current_user: str = Depends(get_current_us
     if delete_result.deleted_count == 1:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     
-    raise HTTPException(status_code=404, detail=f"Habit {habit_id} not found")
+    raise HTTPException(status_code=404, detail="Habit not found")
 
 # AFFIRMATIONS endpoints
 @app.get("/affirmations", response_description="Get all affirmations")
@@ -509,9 +547,11 @@ async def create_affirmation(a: AffirmationCreate, current_user: str = Depends(g
             "message": "Affirmation created successfully",
             "affirmation": new_aff
         }
-    except Exception as e:
-        print(f"Error creating affirmation: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create affirmation: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating affirmation")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # WATER INTAKE endpoints
 @app.get("/water", response_description="Get water intake settings")
@@ -529,9 +569,11 @@ async def get_water(current_user: str = Depends(get_current_user)):
             "dailyGoal": 0,
             "currentOz": 0,
         }
-    except Exception as e:
-        print(f"Error fetching water intake: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch water intake: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching water intake")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/water", response_description="Upsert water intake settings", status_code=status.HTTP_201_CREATED)
 async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_current_user)):
@@ -558,9 +600,11 @@ async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_cur
                 payload["_id"] = str(existing.get("_id"))
 
         return {"message": "Water intake saved", "water": payload}
-    except Exception as e:
-        print(f"Error saving water intake: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save water intake: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error saving water intake")
+        raise HTTPException(status_code=500, detail="Internal server error")
     
 # EXERCISES endpoints
 @app.get("/exercises", response_description="Get user exercises")
@@ -579,9 +623,11 @@ async def get_exercises(current_user: str = Depends(get_current_user)):
                 ex["_id"] = str(ex["_id"])
 
         return exercises
-    except Exception as e:
-        print(f"Error fetching exercises: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch exercises: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching exercises")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/exercises", response_description="Create custom exercise", status_code=status.HTTP_201_CREATED)
 async def create_exercise(ex: ExerciseCreate, current_user: str = Depends(get_current_user)):
@@ -604,9 +650,11 @@ async def create_exercise(ex: ExerciseCreate, current_user: str = Depends(get_cu
         new_ex["_id"] = str(result.inserted_id)
 
         return {"message": "Exercise created", "exercise": new_ex}
-    except Exception as e:
-        print(f"Error creating exercise: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create exercise: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating exercise")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/exercises/{exercise_id}", response_description="Update exercise")
 async def update_exercise(exercise_id: str, patch: ExerciseUpdate, current_user: str = Depends(get_current_user)):
@@ -636,9 +684,9 @@ async def update_exercise(exercise_id: str, patch: ExerciseUpdate, current_user:
         return {"message": "Exercise updated", "exercise": updated}
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error updating exercise: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update exercise: {str(e)}")
+    except Exception:
+        logger.exception("Error updating exercise")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.delete("/exercises/{exercise_id}", response_description="Delete exercise")
 async def delete_exercise(exercise_id: str, current_user: str = Depends(get_current_user)):
@@ -654,9 +702,9 @@ async def delete_exercise(exercise_id: str, current_user: str = Depends(get_curr
         raise HTTPException(status_code=404, detail="Exercise not found")
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error deleting exercise: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete exercise: {str(e)}")
+    except Exception:
+        logger.exception("Error deleting exercise")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # EXAMS endpoints
 @app.post("/exams", response_description="Create exam", status_code=status.HTTP_201_CREATED)
@@ -668,9 +716,11 @@ async def create_exam(exam: ExamCreate, current_user: str = Depends(get_current_
         doc = {**exam.model_dump(), "username": current_user}
         result = await exams_collection.insert_one(doc)
         return {"id": str(result.inserted_id), "message": "Exam created"}
-    except Exception as e:
-        print(f"Error creating exam: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create exam: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating exam")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/exams", response_description="Get exams for user")
 async def get_exams(current_user: str = Depends(get_current_user)):
@@ -682,9 +732,11 @@ async def get_exams(current_user: str = Depends(get_current_user)):
         for ex in exams:
             ex["_id"] = str(ex["_id"])
         return exams
-    except Exception as e:
-        print(f"Error fetching exams: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch exams: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching exams")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # -----------------------------------------------------------
 # ASSIGNMENTS endpoints
@@ -697,9 +749,11 @@ async def get_assignments(current_user: str = Depends(get_current_user)):
     try:
         assignments = await assignments_collection.find({"username": current_user}).to_list(1000)
         return assignments
-    except Exception as e:
-        print(f"Error fetching assignments: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch assignments: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching assignments")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/assignments/{assignment_id}", response_description="Get assignment by ID", response_model=Assignment)
 async def get_assignment(assignment_id: str, current_user: str = Depends(get_current_user)):
@@ -707,15 +761,15 @@ async def get_assignment(assignment_id: str, current_user: str = Depends(get_cur
     Get a specific assignment by ID.
     """
     try:
-        assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id), "username": current_user})
+        assignment = await assignments_collection.find_one({"_id": parse_object_id(assignment_id), "username": current_user})
         if assignment is None:
             raise HTTPException(status_code=404, detail="Assignment not found")
         return assignment
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error fetching assignment: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch assignment: {str(e)}")
+    except Exception:
+        logger.exception("Error fetching assignment")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/assignments", response_description="Create new assignment", status_code=status.HTTP_201_CREATED, response_model=Assignment)
 async def create_assignment(assignment: AssignmentCreate, current_user: str = Depends(get_current_user)):
@@ -727,9 +781,11 @@ async def create_assignment(assignment: AssignmentCreate, current_user: str = De
         result = await assignments_collection.insert_one(assignment_dict)
         created_assignment = await assignments_collection.find_one({"_id": result.inserted_id})
         return created_assignment
-    except Exception as e:
-        print(f"Error creating assignment: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create assignment: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating assignment")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/assignments/{assignment_id}", response_description="Update assignment", response_model=Assignment)
 async def update_assignment(assignment_id: str, assignment: AssignmentCreate, current_user: str = Depends(get_current_user)):
@@ -741,23 +797,23 @@ async def update_assignment(assignment_id: str, assignment: AssignmentCreate, cu
         
         if len(assignment_dict) >= 1:
             update_result = await assignments_collection.update_one(
-                {"_id": ObjectId(assignment_id), "username": current_user},
+                {"_id": parse_object_id(assignment_id), "username": current_user},
                 {"$set": assignment_dict}
             )
             
             if update_result.matched_count == 0:
                 raise HTTPException(status_code=404, detail="Assignment not found")
         
-        updated_assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id), "username": current_user})
+        updated_assignment = await assignments_collection.find_one({"_id": parse_object_id(assignment_id), "username": current_user})
         if updated_assignment is None:
             raise HTTPException(status_code=404, detail="Assignment not found")
         
         return updated_assignment
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error updating assignment: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update assignment: {str(e)}")
+    except Exception:
+        logger.exception("Error updating assignment")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.delete("/assignments/{assignment_id}", response_description="Delete assignment")
 async def delete_assignment(assignment_id: str, current_user: str = Depends(get_current_user)):
@@ -765,7 +821,7 @@ async def delete_assignment(assignment_id: str, current_user: str = Depends(get_
     Delete an assignment.
     """
     try:
-        delete_result = await assignments_collection.delete_one({"_id": ObjectId(assignment_id), "username": current_user})
+        delete_result = await assignments_collection.delete_one({"_id": parse_object_id(assignment_id), "username": current_user})
         
         if delete_result.deleted_count == 1:
             return {"success": True, "id": assignment_id}
@@ -773,9 +829,9 @@ async def delete_assignment(assignment_id: str, current_user: str = Depends(get_
         raise HTTPException(status_code=404, detail="Assignment not found")
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error deleting assignment: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete assignment: {str(e)}")
+    except Exception:
+        logger.exception("Error deleting assignment")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 # -----------------------------------------------------------
 # COURSES endpoints
@@ -788,9 +844,11 @@ async def get_courses(current_user: str = Depends(get_current_user)):
     try:
         courses = await courses_collection.find().to_list(1000)
         return courses
-    except Exception as e:
-        print(f"Error fetching courses: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch courses: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching courses")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.post("/courses", response_description="Create new course", status_code=status.HTTP_201_CREATED, response_model=Course)
 async def create_course(course: CourseCreate, current_user: str = Depends(get_current_user)):
@@ -802,9 +860,11 @@ async def create_course(course: CourseCreate, current_user: str = Depends(get_cu
         result = await courses_collection.insert_one(course_dict)
         created_course = await courses_collection.find_one({"_id": result.inserted_id})
         return created_course
-    except Exception as e:
-        print(f"Error creating course: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create course: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error creating course")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.get("/courses/{course_code}", response_description="Get course by code", response_model=Course)
 async def get_course_by_code(course_code: str, current_user: str = Depends(get_current_user)):
@@ -816,9 +876,11 @@ async def get_course_by_code(course_code: str, current_user: str = Depends(get_c
         if course is None:
             raise HTTPException(status_code=404, detail="Course not found")
         return course
-    except Exception as e:
-        print(f"Error fetching course: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch course: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Error fetching course")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/exams/{exam_id}", response_description="Update exam")
 async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depends(get_current_user)):
@@ -831,7 +893,7 @@ async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depen
             raise HTTPException(status_code=400, detail="No fields provided to update")
 
         updated = await exams_collection.find_one_and_update(
-            {"_id": ObjectId(exam_id), "username": current_user},
+            {"_id": parse_object_id(exam_id), "username": current_user},
             {"$set": update_doc},
             return_document=ReturnDocument.AFTER,
         )
@@ -843,6 +905,6 @@ async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depen
         return {"message": "Exam updated", "exam": updated}
     except HTTPException:
         raise
-    except Exception as e:
-        print(f"Error updating exam: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update exam: {str(e)}")
+    except Exception:
+        logger.exception("Error updating exam")
+        raise HTTPException(status_code=500, detail="Internal server error")
