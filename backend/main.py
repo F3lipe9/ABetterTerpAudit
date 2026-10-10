@@ -774,33 +774,6 @@ async def get_course_by_code(course_code: str, current_user: str = Depends(get_c
         print(f"Error fetching course: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch course: {str(e)}")
 
-# -----------------------------------------------------------
-# ADMIN/UTILITY endpoints
-# -----------------------------------------------------------
-@app.delete("/admin/clear-assignments", response_description="Clear all assignments")
-async def clear_all_assignments(current_user: str = Depends(get_current_user)):
-    """
-    Delete all assignments from the database. USE WITH CAUTION.
-    """
-    try:
-        result = await assignments_collection.delete_many({})
-        return {"message": f"Deleted {result.deleted_count} assignments"}
-    except Exception as e:
-        print(f"Error clearing assignments: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear assignments: {str(e)}")
-
-@app.delete("/admin/clear-courses", response_description="Clear all courses")
-async def clear_all_courses(current_user: str = Depends(get_current_user)):
-    """
-    Delete all courses from the database. USE WITH CAUTION.
-    """
-    try:
-        result = await courses_collection.delete_many({})
-        return {"message": f"Deleted {result.deleted_count} courses"}
-    except Exception as e:
-        print(f"Error clearing courses: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to clear courses: {str(e)}")
-    
 @app.put("/exams/{exam_id}", response_description="Update exam")
 async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depends(get_current_user)):
     """
