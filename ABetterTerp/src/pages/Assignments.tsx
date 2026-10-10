@@ -464,10 +464,12 @@ export default function Assignments() {
                 </select>
                 
                 <input
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
                   placeholder="Points"
                   value={newAssignment.points}
-                  onChange={(e) => setNewAssignment({...newAssignment, points: e.target.value})}
+                  onChange={(e) => setNewAssignment({...newAssignment, points: e.target.value.replace(/\D/g, '').slice(0, 6)})}
                   className="form-input"
                 />
               </div>

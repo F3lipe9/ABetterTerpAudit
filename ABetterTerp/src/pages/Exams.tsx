@@ -121,17 +121,12 @@ export default function Exams() {
   }
 
   async function toggleDone(id: string) {
-    let newDone = false
+    const current = exams.find(exam => exam.id === id)
+    if (!current) return
+    const newDone = !current.done
 
     setExams(prev =>
-      prev.map(exam => {
-        if (exam.id === id) {
-          const updated = { ...exam, done: !exam.done }
-          newDone = updated.done ?? false
-          return updated
-        }
-        return exam
-      })
+      prev.map(exam => (exam.id === id ? { ...exam, done: newDone } : exam))
     )
 
     // optional: persist to backend if PUT endpoint is enabled

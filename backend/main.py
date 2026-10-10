@@ -49,11 +49,27 @@ bearer_scheme = HTTPBearer(auto_error=False)
 ADMIN_USERNAMES = {u.strip() for u in os.getenv("ADMIN_USERNAMES", "").split(",") if u.strip()}
 
 limiter = Limiter(key_func=get_remote_address)
-app = FastAPI()
+# Interactive docs and the OpenAPI schema are only exposed when ENVIRONMENT=development.
+IS_DEV = os.getenv("ENVIRONMENT", "production").lower() == "development"
+if IS_DEV:
+    app = FastAPI()
+else:
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 app.state.limiter = limiter
 
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    # HSTS only when the request actually arrived over TLS (directly or via a proxy).
+    if request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 async def _logged_rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    logger.warning("SECURITY rate_limited ip=%s path=%s limit=%s", _client_ip(request), request.url.path, exc.detail)
+    logger.warning("SECURITY rate_limited ip=%s path=%s limit=%s", _client_ip(request), _log_value(request.url.path), exc.detail)
     return _rate_limit_exceeded_handler(request, exc)
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_handler)
@@ -112,8 +128,9 @@ class UserModel(BaseModel):
     )
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    # Length caps only (no format rules) so login never reveals the registration policy
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
 
 class RegisterRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
@@ -240,7 +257,30 @@ class AssignmentBase(BaseModel):
 class AssignmentCreate(AssignmentBase):
     pass
 
-class Assignment(AssignmentBase):
+class AssignmentUpdate(BaseModel):
+    """Partial update: send only the fields to change."""
+    title: Optional[bounded(200)] = None
+    course: Optional[bounded(100)] = None
+    dueDate: Optional[str] = None
+    status: Optional[Literal["pending", "in-progress", "completed"]] = None
+    priority: Optional[Literal["low", "medium", "high"]] = None
+    type: Optional[Literal["homework", "exam", "project", "lab"]] = None
+    points: Optional[str] = Field(default=None, pattern=r"^\d{0,6}$")
+
+    @field_validator("dueDate")
+    @classmethod
+    def _check_due_date(cls, v):
+        return v if v is None else validate_iso_date(v)
+
+class Assignment(BaseModel):
+    """Response model: plain types, no validators, so older stored documents never fail serialization."""
+    title: str = ""
+    course: str = ""
+    dueDate: str = ""
+    status: str = "pending"
+    priority: str = "medium"
+    type: str = "homework"
+    points: str = "0"
     username: str = ""
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     
@@ -257,7 +297,11 @@ class CourseBase(BaseModel):
 class CourseCreate(CourseBase):
     pass
 
-class Course(CourseBase):
+class Course(BaseModel):
+    """Response model: plain types, no length limits, so older stored documents never fail serialization."""
+    code: str = ""
+    name: str = ""
+    professor: str = ""
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     
     class Config:
@@ -266,10 +310,10 @@ class Course(CourseBase):
         json_encoders = {ObjectId: str}
 
 class ExamUpdate(BaseModel):
-    course: str | None = None
+    course: str | None = Field(default=None, min_length=1, max_length=100)
     date: str | None = None
     planned_hours: int | None = Field(default=None, ge=0, le=1000)
-    score: int | None = None
+    score: int | None = Field(default=None, ge=0, le=100)
     done: bool | None = None
 
     @field_validator("date")
@@ -378,7 +422,7 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
     if creds is None:
-        logger.warning("SECURITY auth_failed reason=missing_token ip=%s path=%s", _client_ip(request), request.url.path)
+        logger.warning("SECURITY auth_failed reason=missing_token ip=%s path=%s", _client_ip(request), _log_value(request.url.path))
         raise unauthorized
     try:
         payload = jwt.decode(
@@ -388,10 +432,10 @@ async def get_current_user(
             options={"require": ["exp", "sub"]},
         )
     except jwt.ExpiredSignatureError:
-        logger.warning("SECURITY auth_failed reason=expired_token ip=%s path=%s", _client_ip(request), request.url.path)
+        logger.warning("SECURITY auth_failed reason=expired_token ip=%s path=%s", _client_ip(request), _log_value(request.url.path))
         raise unauthorized
     except jwt.PyJWTError:
-        logger.warning("SECURITY auth_failed reason=invalid_token ip=%s path=%s", _client_ip(request), request.url.path)
+        logger.warning("SECURITY auth_failed reason=invalid_token ip=%s path=%s", _client_ip(request), _log_value(request.url.path))
         raise unauthorized
     return payload["username"]
 
@@ -399,7 +443,7 @@ async def require_admin(
     request: Request, current_user: str = Depends(get_current_user)
 ) -> str:
     if current_user not in ADMIN_USERNAMES:
-        logger.warning("SECURITY forbidden user=%s ip=%s path=%s", _log_value(current_user), _client_ip(request), request.url.path)
+        logger.warning("SECURITY forbidden user=%s ip=%s path=%s", _log_value(current_user), _client_ip(request), _log_value(request.url.path))
         raise HTTPException(status_code=403, detail="Forbidden")
     return current_user
 
@@ -425,6 +469,10 @@ async def register_user(request: Request, data: RegisterRequest):
         {"$or": [{"username": data.username}, {"email": data.email}]}
     )
     if taken:
+        # The client gets a generic error; the log records which field collided (email itself is not logged)
+        reason = "username_taken" if taken.get("username") == data.username else "email_taken"
+        logger.warning("SECURITY register_failed reason=%s username=%s ip=%s",
+                       reason, _log_value(data.username), _client_ip(request))
         raise failure
 
     try:
@@ -434,7 +482,11 @@ async def register_user(request: Request, data: RegisterRequest):
             "password": hashed,
         })
     except DuplicateKeyError:
+        logger.warning("SECURITY register_failed reason=duplicate_key username=%s ip=%s",
+                       _log_value(data.username), _client_ip(request))
         raise failure
+
+    logger.info("SECURITY register_success username=%s ip=%s", _log_value(data.username), _client_ip(request))
 
     try:
         await seed_default_exercises(data.username)
@@ -853,26 +905,29 @@ async def create_assignment(assignment: AssignmentCreate, current_user: str = De
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @app.put("/assignments/{assignment_id}", response_description="Update assignment", response_model=Assignment)
-async def update_assignment(assignment_id: str, assignment: AssignmentCreate, current_user: str = Depends(get_current_user)):
+async def update_assignment(assignment_id: str, assignment: AssignmentUpdate, current_user: str = Depends(get_current_user)):
     """
     Update an assignment.
     """
     try:
-        assignment_dict = assignment.model_dump(exclude_unset=True)
-        
-        if len(assignment_dict) >= 1:
-            update_result = await assignments_collection.update_one(
-                {"_id": parse_object_id(assignment_id), "username": current_user},
-                {"$set": assignment_dict}
-            )
-            
-            if update_result.matched_count == 0:
-                raise HTTPException(status_code=404, detail="Assignment not found")
-        
-        updated_assignment = await assignments_collection.find_one({"_id": parse_object_id(assignment_id), "username": current_user})
+        assignment_dict = {k: v for k, v in assignment.model_dump().items() if v is not None}
+        if not assignment_dict:
+            raise HTTPException(status_code=400, detail="No fields provided to update")
+
+        # matched_count, not modified_count: re-saving identical values is not "not found"
+        update_result = await assignments_collection.update_one(
+            {"_id": parse_object_id(assignment_id), "username": current_user},
+            {"$set": assignment_dict},
+        )
+        if update_result.matched_count == 0:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
+        updated_assignment = await assignments_collection.find_one(
+            {"_id": parse_object_id(assignment_id), "username": current_user}
+        )
         if updated_assignment is None:
             raise HTTPException(status_code=404, detail="Assignment not found")
-        
+
         return updated_assignment
     except HTTPException:
         raise
