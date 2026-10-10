@@ -1,6 +1,7 @@
 import os
 from typing import List, Optional
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import Response
 from pydantic import ConfigDict, BaseModel, Field
 from pydantic.functional_validators import BeforeValidator
@@ -13,11 +14,22 @@ from pymongo import ReturnDocument
 from dotenv import load_dotenv
 import uuid
 import bcrypt
+import jwt
+import secrets
 from fastapi.concurrency import run_in_threadpool
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 MONGO_URL = os.getenv("MONGO_URL")
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    # No configured secret: use a per-process one. Tokens stop working on restart.
+    print("WARNING: JWT_SECRET not set; using a random per-process secret")
+    JWT_SECRET = secrets.token_urlsafe(48)
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "60"))
+bearer_scheme = HTTPBearer(auto_error=False)
 
 app = FastAPI()
 
@@ -267,6 +279,38 @@ def verify_password(password: str, hashed: str) -> bool:
     except ValueError:  # malformed hash (e.g. legacy plaintext) or password over 72 bytes
         return False
 
+def create_access_token(user_id: str, username: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user_id,
+        "username": username,
+        "iat": now,
+        "exp": now + timedelta(minutes=JWT_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+async def get_current_user(
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> str:
+    """Return the authenticated username from a valid Bearer token, else 401."""
+    unauthorized = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    if creds is None:
+        raise unauthorized
+    try:
+        payload = jwt.decode(
+            creds.credentials,
+            JWT_SECRET,
+            algorithms=[JWT_ALGORITHM],
+            options={"require": ["exp", "sub"]},
+        )
+    except jwt.PyJWTError:
+        raise unauthorized
+    return payload["username"]
+
 # REGISTER USER
 @app.post(
     "/register",
@@ -318,12 +362,14 @@ async def login_user(data: LoginRequest):
     return {
         "message": f"Login successful for {data.username}",
         "user_id": str(user["_id"]),
-        "username": user["username"]
+        "username": user["username"],
+        "access_token": create_access_token(str(user["_id"]), user["username"]),
+        "token_type": "bearer",
     }
 
 # HABITS endpoints
 @app.get("/habits", response_description="Get user habits")
-async def get_habits(username: str):
+async def get_habits(username: str, current_user: str = Depends(get_current_user)):
     """
     Get all habits for a specific user.
     """
@@ -347,7 +393,7 @@ async def get_habits(username: str):
     response_description="Create new habit",
     status_code=status.HTTP_201_CREATED,
 )
-async def create_habit(h: HabitCreate):
+async def create_habit(h: HabitCreate, current_user: str = Depends(get_current_user)):
     """
     Create a new habit for a user.
     """
@@ -375,7 +421,7 @@ async def create_habit(h: HabitCreate):
 
 # Delete habit endpoint
 @app.delete("/habits/{habit_id}", response_description="Delete habit")
-async def delete_habit(habit_id: str):
+async def delete_habit(habit_id: str, current_user: str = Depends(get_current_user)):
     """
     Delete a habit by ID.
     """
@@ -388,7 +434,7 @@ async def delete_habit(habit_id: str):
 
 # AFFIRMATIONS endpoints
 @app.get("/affirmations", response_description="Get all affirmations")
-async def get_affirmations():
+async def get_affirmations(current_user: str = Depends(get_current_user)):
     """
     Get all affirmations.
     """
@@ -410,7 +456,7 @@ async def get_affirmations():
     response_description="Create new affirmation",
     status_code=status.HTTP_201_CREATED,
 )
-async def create_affirmation(a: AffirmationCreate):
+async def create_affirmation(a: AffirmationCreate, current_user: str = Depends(get_current_user)):
     """
     Create a new affirmation.
     """
@@ -428,7 +474,7 @@ async def create_affirmation(a: AffirmationCreate):
 
 # WATER INTAKE endpoints
 @app.get("/water", response_description="Get water intake settings")
-async def get_water(username: str):
+async def get_water(username: str, current_user: str = Depends(get_current_user)):
     """Return water setup for a user."""
     try:
         doc = await water_collection.find_one({"username": username})
@@ -447,7 +493,7 @@ async def get_water(username: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch water intake: {str(e)}")
 
 @app.post("/water", response_description="Upsert water intake settings", status_code=status.HTTP_201_CREATED)
-async def upsert_water(w: WaterIntakeUpsert):
+async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_current_user)):
     """Create or update water intake settings for a user."""
     try:
         payload = {
@@ -477,7 +523,7 @@ async def upsert_water(w: WaterIntakeUpsert):
     
 # EXERCISES endpoints
 @app.get("/exercises", response_description="Get user exercises")
-async def get_exercises(username: str):
+async def get_exercises(username: str, current_user: str = Depends(get_current_user)):
     """
     Returns the exercise library for a user.
     Seeds defaults on first access.
@@ -497,7 +543,7 @@ async def get_exercises(username: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch exercises: {str(e)}")
 
 @app.post("/exercises", response_description="Create custom exercise", status_code=status.HTTP_201_CREATED)
-async def create_exercise(ex: ExerciseCreate):
+async def create_exercise(ex: ExerciseCreate, current_user: str = Depends(get_current_user)):
     """
     Create a custom exercise for a user.
     """
@@ -522,7 +568,7 @@ async def create_exercise(ex: ExerciseCreate):
         raise HTTPException(status_code=500, detail=f"Failed to create exercise: {str(e)}")
 
 @app.put("/exercises/{exercise_id}", response_description="Update exercise")
-async def update_exercise(exercise_id: str, patch: ExerciseUpdate):
+async def update_exercise(exercise_id: str, patch: ExerciseUpdate, current_user: str = Depends(get_current_user)):
     """
     Update an exercise by its 'id' field (not Mongo _id).
     Works for both defaults and custom exercises.
@@ -554,7 +600,7 @@ async def update_exercise(exercise_id: str, patch: ExerciseUpdate):
         raise HTTPException(status_code=500, detail=f"Failed to update exercise: {str(e)}")
 
 @app.delete("/exercises/{exercise_id}", response_description="Delete exercise")
-async def delete_exercise(exercise_id: str):
+async def delete_exercise(exercise_id: str, current_user: str = Depends(get_current_user)):
     """
     Delete an exercise by its 'id' field.
     """
@@ -573,7 +619,7 @@ async def delete_exercise(exercise_id: str):
 
 # EXAMS endpoints
 @app.post("/exams", response_description="Create exam", status_code=status.HTTP_201_CREATED)
-async def create_exam(exam: ExamCreate):
+async def create_exam(exam: ExamCreate, current_user: str = Depends(get_current_user)):
     """
     Create an exam document in MongoDB.
     """
@@ -586,7 +632,7 @@ async def create_exam(exam: ExamCreate):
         raise HTTPException(status_code=500, detail=f"Failed to create exam: {str(e)}")
 
 @app.get("/exams", response_description="Get exams for user")
-async def get_exams(username: str):
+async def get_exams(username: str, current_user: str = Depends(get_current_user)):
     """
     Get all exams for a specific user.
     """
@@ -603,7 +649,7 @@ async def get_exams(username: str):
 # ASSIGNMENTS endpoints
 # -----------------------------------------------------------
 @app.get("/assignments", response_description="Get all assignments", response_model=List[Assignment])
-async def get_assignments():
+async def get_assignments(current_user: str = Depends(get_current_user)):
     """
     Get all assignments.
     """
@@ -615,7 +661,7 @@ async def get_assignments():
         raise HTTPException(status_code=500, detail=f"Failed to fetch assignments: {str(e)}")
 
 @app.get("/assignments/user/{username}", response_description="Get assignments for user", response_model=List[Assignment])
-async def get_user_assignments(username: str):
+async def get_user_assignments(username: str, current_user: str = Depends(get_current_user)):
     """
     Get assignments for a specific user.
     """
@@ -627,7 +673,7 @@ async def get_user_assignments(username: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch assignments: {str(e)}")
 
 @app.get("/assignments/{assignment_id}", response_description="Get assignment by ID", response_model=Assignment)
-async def get_assignment(assignment_id: str):
+async def get_assignment(assignment_id: str, current_user: str = Depends(get_current_user)):
     """
     Get a specific assignment by ID.
     """
@@ -641,7 +687,7 @@ async def get_assignment(assignment_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to fetch assignment: {str(e)}")
 
 @app.post("/assignments", response_description="Create new assignment", status_code=status.HTTP_201_CREATED, response_model=Assignment)
-async def create_assignment(assignment: AssignmentCreate):
+async def create_assignment(assignment: AssignmentCreate, current_user: str = Depends(get_current_user)):
     """
     Create a new assignment.
     """
@@ -655,7 +701,7 @@ async def create_assignment(assignment: AssignmentCreate):
         raise HTTPException(status_code=500, detail=f"Failed to create assignment: {str(e)}")
 
 @app.put("/assignments/{assignment_id}", response_description="Update assignment", response_model=Assignment)
-async def update_assignment(assignment_id: str, assignment: AssignmentCreate):
+async def update_assignment(assignment_id: str, assignment: AssignmentCreate, current_user: str = Depends(get_current_user)):
     """
     Update an assignment.
     """
@@ -681,7 +727,7 @@ async def update_assignment(assignment_id: str, assignment: AssignmentCreate):
         raise HTTPException(status_code=500, detail=f"Failed to update assignment: {str(e)}")
 
 @app.delete("/assignments/{assignment_id}", response_description="Delete assignment")
-async def delete_assignment(assignment_id: str):
+async def delete_assignment(assignment_id: str, current_user: str = Depends(get_current_user)):
     """
     Delete an assignment.
     """
@@ -700,7 +746,7 @@ async def delete_assignment(assignment_id: str):
 # COURSES endpoints
 # -----------------------------------------------------------
 @app.get("/courses", response_description="Get all courses", response_model=List[Course])
-async def get_courses():
+async def get_courses(current_user: str = Depends(get_current_user)):
     """
     Get all courses.
     """
@@ -712,7 +758,7 @@ async def get_courses():
         raise HTTPException(status_code=500, detail=f"Failed to fetch courses: {str(e)}")
 
 @app.post("/courses", response_description="Create new course", status_code=status.HTTP_201_CREATED, response_model=Course)
-async def create_course(course: CourseCreate):
+async def create_course(course: CourseCreate, current_user: str = Depends(get_current_user)):
     """
     Create a new course.
     """
@@ -726,7 +772,7 @@ async def create_course(course: CourseCreate):
         raise HTTPException(status_code=500, detail=f"Failed to create course: {str(e)}")
 
 @app.get("/courses/{course_code}", response_description="Get course by code", response_model=Course)
-async def get_course_by_code(course_code: str):
+async def get_course_by_code(course_code: str, current_user: str = Depends(get_current_user)):
     """
     Get a course by its code.
     """
@@ -743,7 +789,7 @@ async def get_course_by_code(course_code: str):
 # ADMIN/UTILITY endpoints
 # -----------------------------------------------------------
 @app.delete("/admin/clear-assignments", response_description="Clear all assignments")
-async def clear_all_assignments():
+async def clear_all_assignments(current_user: str = Depends(get_current_user)):
     """
     Delete all assignments from the database. USE WITH CAUTION.
     """
@@ -755,7 +801,7 @@ async def clear_all_assignments():
         raise HTTPException(status_code=500, detail=f"Failed to clear assignments: {str(e)}")
 
 @app.delete("/admin/clear-courses", response_description="Clear all courses")
-async def clear_all_courses():
+async def clear_all_courses(current_user: str = Depends(get_current_user)):
     """
     Delete all courses from the database. USE WITH CAUTION.
     """
@@ -767,7 +813,7 @@ async def clear_all_courses():
         raise HTTPException(status_code=500, detail=f"Failed to clear courses: {str(e)}")
     
 @app.put("/exams/{exam_id}", response_description="Update exam")
-async def update_exam(exam_id: str, patch: ExamUpdate):
+async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depends(get_current_user)):
     """
     Update an exam document by Mongo _id.
     """

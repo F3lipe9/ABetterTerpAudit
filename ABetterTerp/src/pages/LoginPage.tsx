@@ -40,6 +40,7 @@ export default function Login() {
       if (response.ok) {
         // Store user info in localStorage
         localStorage.setItem("username", data.username);
+        localStorage.setItem("token", data.access_token);
         localStorage.setItem("email", email);
 
         setMessage(`Logged in as ${data.username}`);
