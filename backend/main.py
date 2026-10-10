@@ -92,7 +92,6 @@ class HabitModel(BaseModel):
     description: str = Field(default="")
 
 class HabitCreate(BaseModel):
-    username: str
     title: str
     description: str | None = ""
 
@@ -115,7 +114,6 @@ class WaterIntakeModel(BaseModel):
     currentOz: int = Field(default=0, ge=0)
 
 class WaterIntakeUpsert(BaseModel):
-    username: str
     bottleName: str
     bottleOz: int
     dailyGoal: int
@@ -132,7 +130,6 @@ class ExerciseModel(BaseModel):
     createdByUser: bool = Field(default=True)
 
 class ExerciseCreate(BaseModel):
-    username: str
     name: str
     muscle: str = "Other"
     equipment: str = "Other"
@@ -147,7 +144,6 @@ class ExerciseUpdate(BaseModel):
     category: Optional[str] = None
 
 class ExamCreate(BaseModel):
-    username: str
     course: str
     date: str
     planned_hours: int
@@ -161,12 +157,12 @@ class AssignmentBase(BaseModel):
     priority: str = "medium"
     type: str = "homework"
     points: str = "0"
-    username: str = Field(...)  # Associate with user
 
 class AssignmentCreate(AssignmentBase):
     pass
 
 class Assignment(AssignmentBase):
+    username: str = ""
     id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     
     class Config:
@@ -369,13 +365,12 @@ async def login_user(data: LoginRequest):
 
 # HABITS endpoints
 @app.get("/habits", response_description="Get user habits")
-async def get_habits(username: str, current_user: str = Depends(get_current_user)):
+async def get_habits(current_user: str = Depends(get_current_user)):
     """
     Get all habits for a specific user.
     """
     try:
-        print(f"Fetching habits for username: {username}")
-        habits = await habits_collection.find({"username": username}).to_list(1000)
+        habits = await habits_collection.find({"username": current_user}).to_list(1000)
         print(f"Found {len(habits)} habits")
         
         # Convert ObjectId to string for JSON serialization
@@ -403,7 +398,7 @@ async def create_habit(h: HabitCreate, current_user: str = Depends(get_current_u
         
         new_habit = {
             "id": habit_id,
-            "username": h.username,
+            "username": current_user,
             "title": h.title,
             "description": h.description or ""
         }
@@ -425,7 +420,7 @@ async def delete_habit(habit_id: str, current_user: str = Depends(get_current_us
     """
     Delete a habit by ID.
     """
-    delete_result = await habits_collection.delete_one({"id": habit_id})
+    delete_result = await habits_collection.delete_one({"id": habit_id, "username": current_user})
     
     if delete_result.deleted_count == 1:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -474,15 +469,15 @@ async def create_affirmation(a: AffirmationCreate, current_user: str = Depends(g
 
 # WATER INTAKE endpoints
 @app.get("/water", response_description="Get water intake settings")
-async def get_water(username: str, current_user: str = Depends(get_current_user)):
+async def get_water(current_user: str = Depends(get_current_user)):
     """Return water setup for a user."""
     try:
-        doc = await water_collection.find_one({"username": username})
+        doc = await water_collection.find_one({"username": current_user})
         if doc:
             doc["_id"] = str(doc.get("_id"))
             return doc
         return {
-            "username": username,
+            "username": current_user,
             "bottleName": "",
             "bottleOz": 0,
             "dailyGoal": 0,
@@ -497,14 +492,14 @@ async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_cur
     """Create or update water intake settings for a user."""
     try:
         payload = {
-            "username": w.username,
+            "username": current_user,
             "bottleName": w.bottleName,
             "bottleOz": w.bottleOz,
             "dailyGoal": w.dailyGoal,
             "currentOz": w.currentOz or 0,
         }
         result = await water_collection.update_one(
-            {"username": w.username},
+            {"username": current_user},
             {"$set": payload},
             upsert=True,
         )
@@ -512,7 +507,7 @@ async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_cur
         if result.upserted_id:
             payload["_id"] = str(result.upserted_id)
         else:
-            existing = await water_collection.find_one({"username": w.username})
+            existing = await water_collection.find_one({"username": current_user})
             if existing:
                 payload["_id"] = str(existing.get("_id"))
 
@@ -523,15 +518,15 @@ async def upsert_water(w: WaterIntakeUpsert, current_user: str = Depends(get_cur
     
 # EXERCISES endpoints
 @app.get("/exercises", response_description="Get user exercises")
-async def get_exercises(username: str, current_user: str = Depends(get_current_user)):
+async def get_exercises(current_user: str = Depends(get_current_user)):
     """
     Returns the exercise library for a user.
     Seeds defaults on first access.
     """
     try:
-        await ensure_default_exercises(username)
+        await ensure_default_exercises(current_user)
 
-        exercises = await exercises_collection.find({"username": username}).to_list(2000)
+        exercises = await exercises_collection.find({"username": current_user}).to_list(2000)
 
         for ex in exercises:
             if "_id" in ex:
@@ -550,7 +545,7 @@ async def create_exercise(ex: ExerciseCreate, current_user: str = Depends(get_cu
     try:
         new_ex = {
             "id": str(uuid.uuid4()),
-            "username": ex.username,
+            "username": current_user,
             "name": ex.name,
             "muscle": ex.muscle or "Other",
             "equipment": ex.equipment or "Other",
@@ -583,7 +578,7 @@ async def update_exercise(exercise_id: str, patch: ExerciseUpdate, current_user:
             raise HTTPException(status_code=400, detail="No fields provided to update")
 
         updated = await exercises_collection.find_one_and_update(
-            {"id": exercise_id},
+            {"id": exercise_id, "username": current_user},
             {"$set": update_doc},
             return_document=ReturnDocument.AFTER,
         )
@@ -605,7 +600,7 @@ async def delete_exercise(exercise_id: str, current_user: str = Depends(get_curr
     Delete an exercise by its 'id' field.
     """
     try:
-        delete_result = await exercises_collection.delete_one({"id": exercise_id})
+        delete_result = await exercises_collection.delete_one({"id": exercise_id, "username": current_user})
 
         if delete_result.deleted_count == 1:
             return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -624,7 +619,7 @@ async def create_exam(exam: ExamCreate, current_user: str = Depends(get_current_
     Create an exam document in MongoDB.
     """
     try:
-        doc = exam.model_dump()
+        doc = {**exam.model_dump(), "username": current_user}
         result = await exams_collection.insert_one(doc)
         return {"id": str(result.inserted_id), "message": "Exam created"}
     except Exception as e:
@@ -632,12 +627,12 @@ async def create_exam(exam: ExamCreate, current_user: str = Depends(get_current_
         raise HTTPException(status_code=500, detail=f"Failed to create exam: {str(e)}")
 
 @app.get("/exams", response_description="Get exams for user")
-async def get_exams(username: str, current_user: str = Depends(get_current_user)):
+async def get_exams(current_user: str = Depends(get_current_user)):
     """
     Get all exams for a specific user.
     """
     try:
-        exams = await exams_collection.find({"username": username}).to_list(1000)
+        exams = await exams_collection.find({"username": current_user}).to_list(1000)
         for ex in exams:
             ex["_id"] = str(ex["_id"])
         return exams
@@ -651,25 +646,13 @@ async def get_exams(username: str, current_user: str = Depends(get_current_user)
 @app.get("/assignments", response_description="Get all assignments", response_model=List[Assignment])
 async def get_assignments(current_user: str = Depends(get_current_user)):
     """
-    Get all assignments.
+    Get the caller's assignments.
     """
     try:
-        assignments = await assignments_collection.find().to_list(1000)
+        assignments = await assignments_collection.find({"username": current_user}).to_list(1000)
         return assignments
     except Exception as e:
         print(f"Error fetching assignments: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch assignments: {str(e)}")
-
-@app.get("/assignments/user/{username}", response_description="Get assignments for user", response_model=List[Assignment])
-async def get_user_assignments(username: str, current_user: str = Depends(get_current_user)):
-    """
-    Get assignments for a specific user.
-    """
-    try:
-        assignments = await assignments_collection.find({"username": username}).to_list(1000)
-        return assignments
-    except Exception as e:
-        print(f"Error fetching user assignments: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch assignments: {str(e)}")
 
 @app.get("/assignments/{assignment_id}", response_description="Get assignment by ID", response_model=Assignment)
@@ -678,10 +661,12 @@ async def get_assignment(assignment_id: str, current_user: str = Depends(get_cur
     Get a specific assignment by ID.
     """
     try:
-        assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id)})
+        assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id), "username": current_user})
         if assignment is None:
             raise HTTPException(status_code=404, detail="Assignment not found")
         return assignment
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error fetching assignment: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch assignment: {str(e)}")
@@ -692,7 +677,7 @@ async def create_assignment(assignment: AssignmentCreate, current_user: str = De
     Create a new assignment.
     """
     try:
-        assignment_dict = assignment.model_dump()
+        assignment_dict = {**assignment.model_dump(), "username": current_user}
         result = await assignments_collection.insert_one(assignment_dict)
         created_assignment = await assignments_collection.find_one({"_id": result.inserted_id})
         return created_assignment
@@ -710,18 +695,20 @@ async def update_assignment(assignment_id: str, assignment: AssignmentCreate, cu
         
         if len(assignment_dict) >= 1:
             update_result = await assignments_collection.update_one(
-                {"_id": ObjectId(assignment_id)},
+                {"_id": ObjectId(assignment_id), "username": current_user},
                 {"$set": assignment_dict}
             )
             
-            if update_result.modified_count == 0:
+            if update_result.matched_count == 0:
                 raise HTTPException(status_code=404, detail="Assignment not found")
         
-        updated_assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id)})
+        updated_assignment = await assignments_collection.find_one({"_id": ObjectId(assignment_id), "username": current_user})
         if updated_assignment is None:
             raise HTTPException(status_code=404, detail="Assignment not found")
         
         return updated_assignment
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error updating assignment: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update assignment: {str(e)}")
@@ -732,12 +719,14 @@ async def delete_assignment(assignment_id: str, current_user: str = Depends(get_
     Delete an assignment.
     """
     try:
-        delete_result = await assignments_collection.delete_one({"_id": ObjectId(assignment_id)})
+        delete_result = await assignments_collection.delete_one({"_id": ObjectId(assignment_id), "username": current_user})
         
         if delete_result.deleted_count == 1:
             return {"success": True, "id": assignment_id}
         
         raise HTTPException(status_code=404, detail="Assignment not found")
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error deleting assignment: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete assignment: {str(e)}")
@@ -823,7 +812,7 @@ async def update_exam(exam_id: str, patch: ExamUpdate, current_user: str = Depen
             raise HTTPException(status_code=400, detail="No fields provided to update")
 
         updated = await exams_collection.find_one_and_update(
-            {"_id": ObjectId(exam_id)},
+            {"_id": ObjectId(exam_id), "username": current_user},
             {"$set": update_doc},
             return_document=ReturnDocument.AFTER,
         )

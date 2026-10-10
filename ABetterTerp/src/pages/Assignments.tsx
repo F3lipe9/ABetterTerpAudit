@@ -234,11 +234,10 @@ export default function Assignments() {
     }
     if (newAssignment.title && newAssignment.course && newAssignment.dueDate) {
       try {
-        const payload = { ...newAssignment, username };
         const response = await fetch(`${API_BASE_URL}/assignments`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
+          body: JSON.stringify(newAssignment)
         });
         if (!response.ok) throw new Error('Failed to add assignment');
         const created = await response.json();
