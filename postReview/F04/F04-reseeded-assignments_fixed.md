@@ -1,0 +1,1 @@
+Not applicable. In the original F04 test the endpoint wiped the assignments, so they had to be re-created. In this retest nothing was deleted (see F04-before-assignments_fixed.md and F04-after-assignments_fixed.md: 1 and 1 before, 1 and 1 after), so no reseeding was needed.
